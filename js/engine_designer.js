@@ -104,7 +104,8 @@ const Designer = {
     if(P.coolP.tempRisk<0) mpsBudget += Math.min(3,-P.coolP.tempRisk/5);
     if(spec.engine.cooling==="oilcool") mpsBudget += 1;
     if(spec.engine.cooling==="duocool") mpsBudget += 2;
-    const revAdd = ENGINE_TUNING.revMaxAdd.rod[rod.id] + ENGINE_TUNING.revMaxAdd.crank[crankFallbackId(spec)];
+    const crankAdd = (ENGINE_TUNING.revMaxAdd.crank[spec.engine.crank]||0) + (P.crank.revLimit||0)*0.3;
+    const revAdd = ENGINE_TUNING.revMaxAdd.rod[rod.id] + crankAdd;
     // rpm where mean piston speed hits budget: rpm = mps*60000/(2*stroke)
     const rpmFromSpeed = mpsBudget*60000/(2*stroke);
     const deepCap = this.deepRevCeiling(s, spec, P);
