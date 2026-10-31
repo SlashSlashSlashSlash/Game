@@ -2,11 +2,22 @@
 const Engine = {
 
   // ─────────── State creation ───────────
-  newState(companyName){
+  newState(companyName, opts){
+    opts = opts || {};
+    const role = CEO_ROLES.find(r=>r.id===opts.role) || CEO_ROLES[3];
+    const hq = HQ_CITIES.find(c=>c.id===opts.hq) || HQ_CITIES[4];
+    const logo = LOGO_SYMBOLS.find(x=>x.id===(opts.logoSymbol||"bolt"))||LOGO_SYMBOLS[0];
+    const shape = LOGO_SHAPES.find(x=>x.id===(opts.logoShape||"circle"))||LOGO_SHAPES[0];
+    const color = BRAND_COLORS.find(x=>x.id===(opts.logoColor||"rosso"))||BRAND_COLORS[0];
+    const startCash = Math.round((opts.startYear===1970?650000:250000) * (role.perks.startCashMul||1));
     const s = {
       company: companyName || "My Motors",
-      year: 1950, month: 0,               // month 0 = Jan
-      money: 250000,
+      ceoRole: role.id,
+      brand: { symbol:logo.id, shape:shape.id, color:color.id },
+      hqCity: hq.id, homeRegion: ({rome:"eu",detroit:"nafta",stuttgart:"eu",tokyo:"apac",crane:"nafta"})[hq.id]||"nafta",
+      startYear: opts.startYear||1950,
+      year: opts.startYear||1950, month: 0,               // month 0 = Jan
+      money: startCash,
       rep: 0,
       loan: 0,
       models: [],                          // published/draft car models
@@ -32,9 +43,35 @@ const Engine = {
       nextModelId: 1,
       speed: 1, paused: false,
       designCostBase: 8000,
+      // ── deep-systems state ──
+      rp: 0,                              // research points currency
+      hqLevel: 0,
+      fans: 0,
+      regions: {},                        // regionId -> {opened, share}
+      campaigns: [],                      // active marketing campaigns
+      campaignHistory: 0,
+      reviews: {},                        // modelId -> [{critic,score,txt}]
+      raceTeam: null,                     // {seriesId, modelId, budgetPts, points, wins}
+      raceWins: 0, racePodiums: 0, racePoints: 0, raceSeason: null,
+      recallsDone: 0, defectPool: 0,
+      lastStatement: null,
+      oilSurvived: false, usedLoanDuringCrisis: false,
+      envMandate:false, evSubsidy:false, suvBoom:false, gpsEra:false, macroDone:{},
+      refineLevels: {},                   // part family refinement tiers bought with RP
+      marketingHistory: 0,
+      leaderRank: 39,
+      monthlyProfitLog: [],
     };
+    s.regions[s.homeRegion] = { opened:true, share:0.02 };
     // starter techs (free)
     ["ice","manual3","rwd","ladder","drumbrake","liveaxle","biasply","basicint"].forEach(t=>s.techs[t]=true);
+    if(role.perks.researchSpeedAdd) s.innovatorBoost = role.perks.researchSpeedAdd;
+    if(opts.startYear && opts.startYear>1950){
+      // backdate starter techs for later-era starts (like CCT's 1970 start)
+      const yOff = opts.startYear-1950;
+      TECHS.forEach(t=>{ if(t.year<=opts.startYear-3 && !t.req.length) s.techs[t.id]=true; });
+      ["fuelinj","auto2","fwd","m4","discF","coil","rad","betterint","seatbelt","leanburn","unibody","at3","hatchback"].forEach(t=>{ if(TECHS.find(x=>x.id===t)) s.techs[t]=true; });
+    }
     s.applicants = this.genApplicants(s, 4);
     s.competitors = this.genCompetitors(s);
     this.pushNews(s,"🏢 "+s.company+" founded in 1950 with $250,000 in capital. Good luck!");
@@ -104,28 +141,28 @@ const Engine = {
     const isEV = !!spec.engine.motor;
     let cost = 0, mass = 900;
     let rel=45, perf=0, comfort=0, looks=0, safety=0, eco=1; // eco multiplier: lower=better
+    if(!spec.tune) spec.tune = Designer.autoTune(s, spec);
 
-    // engine
+    // engine — full volumetric physics via Designer module
+    let engRes;
     if(isEV){
-      const m = EV_MOTORS.find(x=>x.id===spec.engine.motor);
-      const b = EV_BATTERIES.find(x=>x.id===spec.engine.batt)||EV_BATTERIES[0];
-      cost += m.cost + b.cost; mass += m.mass + b.mass;
-      perf += m.hp*0.55; rel += m.relM + 10;
-      eco *= .25; comfort += 4;
-      spec._hp = m.hp;
+      engRes = Designer.computeEV(s, spec);
+      spec._eng = engRes;
+      cost += engRes.cost; mass += engRes.mass - 120;
+      perf += engRes.hp*0.55; rel += engRes.relMod;
+      eco *= engRes.eco; comfort += 4 + (engRes.noise<20?6:0);
+      spec._hp = engRes.hp;
+      spec._range = engRes.range;
     } else {
-      const L = ENGINE_LAYOUTS.find(x=>x.id===spec.engine.layout)||ENGINE_LAYOUTS[2];
-      const D = DISPLACEMENTS.find(x=>x.id===spec.engine.disp)||DISPLACEMENTS[4];
-      const F = ENGINE_FUELS.find(x=>x.id===spec.engine.fuel)||ENGINE_FUELS[0];
-      const A = ASPIRATION.find(x=>x.id===spec.engine.asp)||ASPIRATION[0];
-      const FS= FUEL_SYS.find(x=>x.id===spec.engine.fuelSys)||FUEL_SYS[0];
-      const ecost = 400 + D.cc*0.42 + L.mult*600 + A.cost + FS.cost + F.cost;
-      cost += ecost; mass += 90 + D.cc*0.055 + L.mass;
-      const hp = D.cc * 0.075 * L.mult * A.powerM * F.powerM * FS.powerM;
-      perf += hp*0.5;
-      rel += F.relM + A.relM + FS.relM + (D.cc>4000? -6:0) + (A.id==="na"?4:0);
-      eco *= (0.55 + D.cc/6500) * A.ecoM * F.ecoM * FS.ecoM;
-      spec._hp = Math.round(hp);
+      engRes = Designer.computeEngine(s, spec);
+      spec._eng = engRes;
+      cost += engRes.cost; mass += engRes.mass;
+      perf += engRes.hp*0.5;
+      rel += engRes.relMod;
+      eco *= engRes.eco * (0.72 + spec.tune.dispCC/9000);
+      spec._hp = engRes.hp;
+      // noise hurts comfort slightly on loud engines
+      if(engRes.noise>70) comfort -= Math.round((engRes.noise-70)/6);
     }
     // gearbox
     const G = GEARBOXES.find(x=>x.id===spec.gearbox)||GEARBOXES[0];
@@ -157,7 +194,7 @@ const Engine = {
     // safety equip
     const SF = SAFETY_EQUIP.find(x=>x.id===spec.safety)||SAFETY_EQUIP[0];
     cost += SF.cost; safety += SF.safety;
-    // emissions
+    // emissions legality penalty applied at appeal stage
     const EM = EMISSIONS.find(x=>x.id===spec.emissions)||EMISSIONS[0];
     cost += EM.cost; if(EM.ecoPen) eco*=EM.ecoPen;
     // options
@@ -170,6 +207,16 @@ const Engine = {
     const body = BODY_TYPES.find(b=>b.id===spec.body);
     if(body){ rel+=body.mods.reliability||0; comfort+=body.mods.comfort||0; looks+=body.mods.looks||0;
               perf+=body.mods.performance||0; safety+=body.mods.safety||0; eco*=1+(body.mods.fuelEco?-body.mods.fuelEco/100:0); }
+
+    // aero & handling derived values feed performance rating
+    spec._cd = Designer.dragCd(spec.body, spec.options||[]);
+    spec._handling = Designer.handlingIndex(s, spec, { chassis:C, susp:SU, tyres:T, brakes:B, drivetrain:DT });
+    spec._wd = Math.round(Designer.layoutWeightDist(spec)*100);
+    perf += (spec._handling-45)*0.35;
+    // heavy car with small engine hurts performance
+    const powerWeight = (spec._hp||40)/(mass/1000*100);
+    if(powerWeight < 55) perf -= (55-powerWeight)*0.5;
+    if(powerWeight > 180) perf += Math.min(18,(powerWeight-180)*0.12);
 
     // staff/design quality bonus
     const designerB = this.staffBonus(s,"designer"), engB = this.staffBonus(s,"engineer");
@@ -198,17 +245,7 @@ const Engine = {
     // scale part costs to the game era (data values are modern dollars)
     const eraF = 0.28 + 0.72*Math.max(0,s.year-1950)/75;
     const unitCost = Math.max(120, Math.round((cost*0.9 + 350)*eraF));
-    // engine power should be era-appropriate: scale hp to the benchmark curve
-    let hp = spec._hp||0;
-    if(!isEV && hp>0){
-      const benchHp = 42 + Math.max(0,(s.year-1950))*2.7;
-      const perfRatio = clamp(perf/(benchHp*0.5), .3, 2.6);
-      hp = Math.round(clamp(benchHp*perfRatio, 8, 1500));
-    } else if(isEV){
-      const benchHp = 42 + Math.max(0,(s.year-1950))*2.7;
-      hp = Math.round(clamp(hp*(0.5+0.5*Math.min(2,hp/benchHp)), 10, 1500));
-    }
-    return { R, unitCost, hp, mass: Math.round(mass) };
+    return { R, unitCost, hp: spec._hp||0, mass: Math.round(mass) };
   },
 
   // appeal score 0-100 of a model against its segment
@@ -490,7 +527,8 @@ const Engine = {
     const lux = ["luxury","supercar","sports"].includes(segment);
     const spec = {
       name, segment, body,
-      engine:{ layout:"i4", disp:"d16", fuel:"petrol", asp:"na", fuelSys:"carb1", motor:null, batt:null },
+      engine:{ layout:"i4", disp:"cc1600", fuel:"petrol", asp:"na", fuelSys:"carb1", motor:null, batt:null,
+               valvetrain:"ohv", block:"iron", rod:"cast", crank:"steelcrank", cooling:"thermo", exhaust:"restricted", richness:"ideal", revLimit:6000 },
       gearbox: lux?"a3":"m3", drivetrain:"rwd", chassis:"lad", brakes:"drum", susp:"leaf", tyres:"bias",
       interior:"basic", electronics:"norad", safety:"none", emissions:"raw", options:[],
       _designMonth: this.absMonth(s),
@@ -558,7 +596,7 @@ const Engine = {
     if(spec._existingId){
       // update existing model (facelift)
       const m = s.models.find(x=>x.id===spec._existingId);
-      Object.assign(m,{ name:spec.name, spec:{...spec}, R:ev.R, unitCost:ev.unitCost, hp:ev.hp, mass:ev.mass, price:Math.round(price), facelifts:(m.facelifts||0)+1 });
+      Object.assign(m,{ name:spec.name, spec:{...spec}, R:ev.R, unitCost:ev.unitCost, hp:ev.hp, mass:ev.mass, price:Math.round(price), facelifts:(m.facelifts||0)+1, cd:spec._cd, handling:spec._handling, wd:spec._wd, torque:spec._eng?spec._eng.torque:0, redline:spec._eng?spec._eng.rpmRedline:0, range:spec._range||0 }); m.version=(m.version||1)+1;
       m.appeal = this.modelAppeal(s,m);
       this.pushNews(s,"🔧 Facelift released: <b>"+m.name+"</b> (v"+m.version+")");
       toast("Facelift applied to "+m.name,"good");
@@ -569,6 +607,11 @@ const Engine = {
         price: Math.round(price), published:true, version:1,
         launchYear:s.year, launchMonth:s.month, designMonth:this.absMonth(s),
         salesTotal:0, salesMonth:0, facelifts:0,
+        isEV: !!spec.engine.motor,
+        cd: spec._cd, handling: spec._handling, wd: spec._wd,
+        torque: spec._eng ? spec._eng.torque : 0,
+        redline: spec._eng ? spec._eng.rpmRedline : 0,
+        range: spec._range || 0,
       };
       m.appeal = this.modelAppeal(s,m);
       s.models.push(m);

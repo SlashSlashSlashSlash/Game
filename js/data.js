@@ -78,27 +78,37 @@ const TECHS = [
   { id:"autopark",   name:"Auto Parking Assist",      cat:"Electronics",cost:150000,time:5,  desc:"", req:["infotain","esp"], year:2012 },
   { id:"batt_li",    name:"Lithium-Ion Battery Pack", cat:"EV",         cost:180000,time:6,  desc:"Serious EV range.", req:["evdrive"] },
   { id:"fastcharge", name:"Fast Charging",            cat:"EV",         cost:120000,time:4,  desc:"", req:["batt_li"], year:2012 },
+  { id:"vvt",      name:"Variable Valve Timing",     cat:"Engine",     cost:110000,time:5,  desc:"Power across the rev range.", req:["dohc"], year:1980 },
+  { id:"drysump",  name:"Dry Sump Lubrication",     cat:"Engine",     cost:70000, time:3,  desc:"Race-grade oiling, lower CG.", req:["vengine"], year:1960 },
+  { id:"hybridfull",name:"Full Hybrid Assist",      cat:"Engine",     cost:180000,time:7,  desc:"Regen braking + electric torque fill.", req:["hybrid","batt_li"], year:2004 },
+  { id:"solidbatt",name:"Solid-State Battery",      cat:"EV",         cost:320000,time:8,  desc:"Dense, safe next-gen cells.", req:["batt_li"], year:2024 },
+  { id:"hydrogen", name:"Hydrogen Fuel Cell",       cat:"EV",         cost:280000,time:8,  desc:"Zero-emission long range.", req:["evdrive"], year:2015 },
+  { id:"autotech", name:"Autonomous Driving Stack", cat:"Electronics",cost:260000,time:7,  desc:"Self-driving hardware suite.", req:["infotain","esp"], year:2016 },
+  { id:"telemetry",name:"Motorsport Telemetry",     cat:"Motorsport", cost:90000, time:4,  desc:"+10% race performance.", req:[], year:1980 },
+  { id:"windtunnel",name:"Wind Tunnel",             cat:"Motorsport", cost:150000,time:5,  desc:"+aero: looks & high-speed grip.", req:[], year:1970 },
 ];
 
 // ── ENGINES ──
+// Cylinders are computed from layout geometry: inline n, V (n/2 per bank), W (4 banks), flat (n/2 per side)
 const ENGINE_LAYOUTS = [
-  { id:"i2",  name:"Inline-2",       tech:"ice",     year:1950, mult:.35, mass:-60 },
-  { id:"i3",  name:"Inline-3",       tech:"ice",     year:1950, mult:.55, mass:-40 },
-  { id:"i4",  name:"Inline-4",       tech:"ice",     year:1950, mult:.8,  mass:-20 },
-  { id:"i5",  name:"Inline-5",       tech:"ice",     year:1958, mult:.95, mass:-10 },
-  { id:"v6",  name:"V6",             tech:"vengine", year:1950, mult:1.15,mass:0 },
-  { id:"v8",  name:"V8",             tech:"vengine", year:1950, mult:1.5, mass:35 },
-  { id:"v10", name:"V10",            tech:"vengine", year:1988, mult:1.8, mass:55 },
-  { id:"v12", name:"V12",            tech:"vengine", year:1950, mult:2.2, mass:85 },
-  { id:"w16", name:"W16 Quad-Turbo", tech:"dohc",    year:1999, mult:3.0, mass:110 },
+  { id:"i2",  name:"Inline-2",        tech:"ice",     year:1950, mult:.35, mass:-60, cyls:2,  form:"inline" },
+  { id:"i3",  name:"Inline-3",        tech:"ice",     year:1950, mult:.55, mass:-40, cyls:3,  form:"inline" },
+  { id:"i4",  name:"Inline-4",        tech:"ice",     year:1950, mult:.8,  mass:-20, cyls:4,  form:"inline" },
+  { id:"i5",  name:"Inline-5",        tech:"ice",     year:1958, mult:.95, mass:-10, cyls:5,  form:"inline" },
+  { id:"i6",  name:"Inline-6",        tech:"ice",     year:1950, mult:1.05,mass:10,  cyls:6,  form:"inline" },
+  { id:"v6",  name:"V6",              tech:"vengine", year:1950, mult:1.15,mass:0,   cyls:6,  form:"vee" },
+  { id:"v8",  name:"V8",              tech:"vengine", year:1950, mult:1.5, mass:35,  cyls:8,  form:"vee" },
+  { id:"v10", name:"V10",             tech:"vengine", year:1988, mult:1.8, mass:55,  cyls:10, form:"vee" },
+  { id:"v12", name:"V12",             tech:"vengine", year:1950, mult:2.2, mass:85,  cyls:12, form:"vee" },
+  { id:"f4",  name:"Flat-4 Boxer",    tech:"vengine", year:1957, mult:.9,  mass:-5,  cyls:4,  form:"flat" },
+  { id:"f6",  name:"Flat-6 Boxer",    tech:"vengine", year:1963, mult:1.3, mass:15,  cyls:6,  form:"flat" },
+  { id:"w16", name:"W16 Quad-Bank",   tech:"dohc",    year:1999, mult:3.0, mass:110, cyls:16, form:"w" },
 ];
-const DISPLACEMENTS = [
-  { id:"d08", name:"0.8 L", cc:800 }, { id:"d10", name:"1.0 L", cc:1000 }, { id:"d12", name:"1.2 L", cc:1200 },
-  { id:"d14", name:"1.4 L", cc:1400 }, { id:"d16", name:"1.6 L", cc:1600 }, { id:"d18", name:"1.8 L", cc:1800 },
-  { id:"d20", name:"2.0 L", cc:2000 }, { id:"d24", name:"2.4 L", cc:2400 }, { id:"d30", name:"3.0 L", cc:3000 },
-  { id:"d35", name:"3.5 L", cc:3500 }, { id:"d40", name:"4.0 L", cc:4000 }, { id:"d48", name:"4.8 L", cc:4800 },
-  { id:"d55", name:"5.5 L", cc:5500 }, { id:"d65", name:"6.5 L", cc:6500 }, { id:"d80", name:"8.0 L", cc:8000 },
-];
+// Fine displacement slider (litres). Bore/stroke sliders in the editor derive from this + cylinder count.
+const DISPLACEMENTS = [];
+for(let cc=600; cc<=8500; cc+=100){
+  DISPLACEMENTS.push({ id:"cc"+cc, name:(cc/1000).toFixed(1)+" L", cc });
+}
 const FUEL_SYS = [
   { id:"carb1", name:"Single Carburetor",    tech:null,      year:1950, powerM:1,    relM:0,  ecoM:1,    cost:120 },
   { id:"carb2", name:"Twin Carburetors",     tech:null,      year:1955, powerM:1.1,  relM:-6, ecoM:1.15, cost:260 },
@@ -128,6 +138,8 @@ const EV_BATTERIES = [
   { id:"li40", name:"Li-Ion 40 kWh",         tech:"batt_li", year:2010, range:230, mass:95,  cost:6800 },
   { id:"li75", name:"Li-Ion 75 kWh",         tech:"batt_li", year:2015, range:400, mass:110, cost:10500 },
   { id:"li100",name:"Li-Ion 100 kWh",        tech:"batt_li", year:2020, range:550, mass:130, cost:14000 },
+  { id:"solid80",name:"Solid-State 80 kWh",   tech:"solidbatt",year:2024, range:620, mass:85,  cost:16500 },
+  { id:"h2fuel", name:"Hydrogen Fuel Cell 60kW-eq", tech:"hydrogen", year:2015, range:480, mass:120, cost:13000 },
 ];
 
 // ── GEARBOXES ──
@@ -141,6 +153,8 @@ const GEARBOXES = [
   { id:"m6", name:"6-Speed Manual",    tech:"manual5", year:1997, cost:900,  rel:3,  perf:10, comfort:2 },
   { id:"a6", name:"6-Speed Auto",      tech:"auto6",   year:2003, cost:1900, rel:0,  perf:8,  comfort:9 },
   { id:"dct",name:"8-Speed DCT",       tech:"auto6",   year:2009, cost:2900, rel:-4, perf:15, comfort:7 },
+  { id:"dct10",name:"10-Speed DCT",      tech:"auto6",   year:2015, cost:3800, rel:-3, perf:19, comfort:8 },
+  { id:"m7", name:"7-Speed Manual",    tech:"manual5", year:2012, cost:1200, rel:3,  perf:13, comfort:2 },
   { id:"sg", name:"Single-Speed (EV)", tech:"evdrive", year:1996, cost:1100, rel:12, perf:6,  comfort:8, evOnly:true },
 ];
 
@@ -327,3 +341,64 @@ function companyValue(s){
   v += Object.keys(s.techs).length*15000;
   return Math.round(v);
 }
+
+
+// ═══ INTERNAL MECHANICAL TUNING (CCT-style sliders & material pickers) ═══
+const VALVETRAINS = [
+  { id:"sv",  name:"Side Valve (SV)",      tech:null,     year:1950, powerM:.85, relM:6,  ecoM:1.05, cost:0 },
+  { id:"ohv", name:"Overhead Valve (OHV)", tech:null,     year:1950, powerM:1,   relM:3,  ecoM:1,    cost:140 },
+  { id:"sohc",name:"SOHC Multi-Valve",     tech:"dohc",   year:1970, powerM:1.07,relM:0,  ecoM:.95,  cost:420 },
+  { id:"dohc",name:"DOHC 4-Valve/Cyl",     tech:"dohc",   year:1985, powerM:1.14,relM:-2, ecoM:.92,  cost:780 },
+  { id:"vvtv",name:"DOHC + Variable Timing",tech:"vvt",   year:1995, powerM:1.2, relM:0,  ecoM:.85,  cost:1250 },
+];
+const BLOCK_MATERIALS = [
+  { id:"iron",   name:"Cast Iron Block",       tech:null,          year:1950, massP:45,  relM:5,  cost:0 },
+  { id:"steel",  name:"Stamped Steel Block",   tech:null,          year:1955, massP:25,  relM:2,  cost:180 },
+  { id:"alublk", name:"Aluminium Alloy Block", tech:"unibody",     year:1965, massP:-15, relM:-2, cost:640 },
+  { id:"compblk",name:"Composite Ceramic-Matrix",tech:"carbon",    year:1995, massP:-30, relM:-4, cost:1900 },
+];
+const ROD_MATERIALS = [
+  { id:"cast",   name:"Cast Steel Rods",     tech:null,     year:1950, revLimit:0,   relM:0,  cost:0 },
+  { id:"forged", name:"Forged Steel Rods",   tech:null,     year:1960, revLimit:800, relM:2,  cost:260 },
+  { id:"powder", name:"Powder-Metal Rods",   tech:"dohc",   year:1990, revLimit:1400,relM:1,  cost:480 },
+  { id:"titan",  name:"Titanium Con-Rods",   tech:"carbon", year:2000, revLimit:2200,relM:-1, cost:1400 },
+];
+const CRANK_MATERIALS = [
+  { id:"steelcrank", name:"Billet Steel Crank", tech:null,    year:1950, revLimit:0,   massP:8,  cost:0 },
+  { id:"nodular",    name:"Nodular Iron Crank", tech:null,    year:1970, revLimit:400, massP:0,  cost:150 },
+  { id:"lightcrank", name:"Lightweight Forged", tech:"dohc",  year:1988, revLimit:1100,massP:-6, cost:520 },
+];
+const COOLING_SYS = [
+  { id:"thermo", name:"Thermostatic Radiator", tech:null,    year:1950, relM:0,  cost:0 },
+  { id:"oilcool",name:"Oil Cooler Added",      tech:null,    year:1965, relM:4,  revLimit:500, cost:220 },
+  { id:"duocool",name:"Dual Radiator + Intercooler",tech:"turbo", year:1980, relM:8, revLimit:900, cost:640 },
+];
+const EXHAUST_SYS = [
+  { id:"restricted", name:"Restricted Stock Exhaust", tech:null,   year:1950, powerM:.92, ecoM:.98, noise:-4, cost:0 },
+  { id:"free",       name:"Free-Flow Exhaust",        tech:null,   year:1960, powerM:1.04,ecoM:1.02,noise:5,  cost:260 },
+  { id:"raceexh",    name:"Race Headers & Titanium Pipes",tech:"carbon",year:1990,powerM:1.09,ecoM:1.04,noise:10,cost:900 },
+];
+const FUEL_RICHNESS = [ // mixture tuning slider positions
+  { id:"lean",  name:"Lean Mixture",  powerM:.93, ecoM:.88, relM:-6 },
+  { id:"ideal", name:"Ideal Ratio",   powerM:1,   ecoM:1,   relM:0 },
+  { id:"rich",  name:"Rich Mixture",  powerM:1.07,ecoM:1.18,relM:2 },
+];
+const ENGINE_TUNING = {
+  boreMin:72, boreMax:104, strokeMin:60, strokeMax:105,
+  revBase:5200, revMaxAdd:{ rod:{ cast:0, forged:800, powder:1400, titan:2200 }, crank:{ steelcrank:0, nodular:400, lightcrank:1100 } },
+};
+const TRANSMISSION_TYPES = [ // fine-grained gearbox parts (replaces coarse list usage in editor for depth)
+  { id:"mt",  name:"Manual Gearbox",      desc:"Robust, cheap, engaging.", relM:4,  comfortM:-2, costM:1 },
+  { id:"at",  name:"Torque-Converter Auto",desc:"Convenience best-seller.", relM:-4, comfortM:6,  costM:2.1, ecoM:1.08 },
+  { id:"amts",name:"Automated Manual",    desc:"Cheap auto-ish shifting.", relM:-6, comfortM:2,  costM:1.6, ecoM:1.02 },
+  { id:"dctt",name:"Dual-Clutch (DCT)",   desc:"Fast shifts, premium.",   relM:-3, comfortM:4,  costM:3.2, ecoM:.95 },
+  { id:"cvtg",name:"CVT Belt Drive",      desc:"Smooth & efficient.",     relM:-2, comfortM:7,  costM:2.3, ecoM:.85 },
+];
+
+// ═══ REGION FLAVOUR / macro events extra ═══
+const MACRO_EVENTS = [
+  { id:"envmandate", txt:"🌿 Environmental mandate: raw exhaust cars banned from sale!", minYear:1970, once:true, apply:s=>{ s.envMandate=true; } },
+  { id:"evpush",     txt:"⚡ Green subsidy wave: EV segment demand +40% this decade.", minYear:2010, once:true, apply:s=>{ s.evSubsidy=true; } },
+  { id:"suvboom",    txt:"🛻 The SUV boom rolls into town — utility vehicles sell themselves.", minYear:1992, once:true, apply:s=>{ s.suvBoom=true; } },
+  { id:"gpstime",    txt:"🛰️ GPS navigation becomes a consumer must-have.", minYear:1998, once:true, apply:s=>{ s.gpsEra=true; } },
+];
