@@ -112,27 +112,31 @@ const Engine = {
   // ─────────── Competitors ───────────
   genCompetitors(s){
     const comps=[];
-    const names=[...COMP_NAMES].sort(()=>Math.random()-.5).slice(0,6);
-    for(const nm of names){
+    // the world is full of rivals — up to 38 AI automakers on the leaderboard (like CCT)
+    const names=[...COMP_NAMES].sort(()=>Math.random()-.5);
+    const count = 10 + Math.floor(Math.random()*6);
+    for(const nm of names.slice(0,count)){
       const seg = SEGMENTS[Math.floor(Math.random()*5)].id; // early-era segments
-      comps.push({ name:nm, seg, quality: 35+Math.random()*30, priceMul:.9+Math.random()*.3, share:0 });
+      comps.push({ name:nm, seg, quality: 35+Math.random()*30, priceMul:.9+Math.random()*.3, share:0,
+                   value: 400000 + Math.random()*9e6 });
     }
     return comps;
   },
   tickCompetitors(s){
     // occasionally add a new competitor or refresh their offerings
-    if(Math.random()<.02 && s.competitors.length<10){
+    if(Math.random()<.02 && s.competitors.length<38){
       const pool = COMP_NAMES.filter(n=>!s.competitors.some(c=>c.name===n));
       if(pool.length){
         const unlockedSegs = SEGMENTS.filter(g=>g.unlock<=s.year);
         const seg = unlockedSegs[Math.floor(Math.random()*unlockedSegs.length)].id;
-        s.competitors.push({ name:pool[Math.floor(Math.random()*pool.length)], seg, quality: 40+Math.random()*35, priceMul:.9+Math.random()*.3, share:0 });
+        s.competitors.push({ name:pool[Math.floor(Math.random()*pool.length)], seg, quality: 40+Math.random()*35, priceMul:.9+Math.random()*.3, share:0, value: 400000 + Math.random()*9e6 });
         this.pushNews(s,"🆕 "+s.competitors[s.competitors.length-1].name+" entered the "+SEGMENTS.find(g=>g.id===seg).name+" market.");
       }
     }
     for(const c of s.competitors){
       c.quality = Math.min(96, c.quality + Math.random()*.55);   // AI slowly improves
       if(Math.random()<.01) c.priceMul = .85+Math.random()*.4;
+      c.value = (c.value||500000) * (1 + (Math.random()*0.02 - 0.007)); // rival valuations drift monthly
     }
   },
 
@@ -229,6 +233,10 @@ const Engine = {
     const age = (this.absMonth(s) - (spec._designMonth!=null?spec._designMonth:this.absMonth(s)))/12;
     const agePenalty = age*4.5;
 
+    // era benchmark power (grows through decades) — used to normalise performance rating
+    const yrNow = s.year;
+    const bench = 55 + Math.max(0,(yrNow-1950))*2.6;   // "average" car power points for the era
+
     // ── real physics performance package: dyno curve integration across the gearbox ──
     let perfPkg = null;
     try { perfPkg = Designer.computePerformance(s, spec, engRes); } catch(e){ perfPkg = null; }
@@ -243,10 +251,6 @@ const Engine = {
       perf = Math.round(perf*0.35 + measPerf*bench/100*0.65);
       eco = eco*0.55 + clamp(perfPkg.cruise.l100!=null? (perfPkg.cruise.l100/16): (perfPkg.cruise.kwh100?0.55:1),0.3,1.6)*0.45*eco;
     }
-
-    // era benchmark power (grows through decades) — used to normalise performance rating
-    const yrNow = s.year;
-    const bench = 55 + Math.max(0,(yrNow-1950))*2.6;   // "average" car power points for the era
 
     // normalise to 0-100 ratings
     const R = {
@@ -319,9 +323,22 @@ const Engine = {
 
     this.tickCompetitors(s);
     this.processResearch(s);
+    // ── deep systems: RP economy, macro history events, marketing lifecycle ──
+    if(typeof Systems !== "undefined"){ Systems.tickRP(s); Systems.tickMacro(s); }
+    const campaignMul = (typeof Systems !== "undefined") ? Systems.tickCampaigns(s) : 1;
     const produced = this.processProduction(s);
-    const soldInfo = this.processSales(s);
+    const soldInfo = this.processSales(s, campaignMul);
+    s.totalSold += soldInfo.units;   // lifetime counter (drives objectives & stats)
     this.processCosts(s, soldInfo);
+    // ── fans & loyalty loop, defect/recall pool, racing calendar, leaderboard rank ──
+    if(typeof Systems !== "undefined"){
+      const pubs = s.models.filter(m=>m.published);
+      const avgAppeal = pubs.length? pubs.reduce((a,m)=>a+this.modelAppeal(s,m),0)/pubs.length : 50;
+      Systems.tickFans(s, soldInfo.units, avgAppeal);
+      Systems.tickDefects(s);
+      Systems.tickRacing(s);
+      Systems.updateLeaderRank(s);
+    }
     this.refreshApplicants(s);
     this.checkObjectives(s);
     this.randomEvent(s);
@@ -334,7 +351,9 @@ const Engine = {
   processResearch(s){
     if(!s.researchQueue) return;
     const lab = s.buildings.lab||0;
-    const spd = 1 + lab*.25 + this.staffBonus(s,"researcher")*.8;
+    // Innovator CEO perk (+50% research speed), R&D labs, researchers and HQ campus all stack
+    const hqRes = (typeof Systems!=="undefined" && hqState(s).resMul) ? hqState(s).resMul : 1;
+    const spd = (1 + lab*.25 + this.staffBonus(s,"researcher")*.8) * (1+(s.innovatorBoost||0)) * hqRes;
     s.researchQueue.monthsLeft -= spd;
     if(s.researchQueue.monthsLeft<=0){
       const t = TECHS.find(x=>x.id===s.researchQueue.techId);
@@ -388,7 +407,8 @@ const Engine = {
     return totalBuilt;
   },
 
-  processSales(s){
+  processSales(s, campaignMul){
+    campaignMul = campaignMul || 1;
     const infl = this.inflation(s);
     const mkt = this.econMod(s);
     let revenue=0, units=0;
@@ -400,8 +420,20 @@ const Engine = {
       if(s.trendSeg===seg.id) base*=1.5;
       if(s.oilCrisis>this.absMonth(s) && (seg.id==="suv"||seg.id==="sports"||seg.id==="supercar")) base*=.6;
       if(s.oilCrisis>this.absMonth(s) && (seg.id==="budget"||seg.id==="economy"||seg.id==="ev")) base*=1.25;
+      if(s.suvBoom && (seg.id==="suv"||seg.id==="pickup")) base*=1.2;
+      if(s.evSubsidy && seg.id==="ev") base*=1.4;
       s.segSales[seg.id]={your:0,total:base};
     }
+    // global region footprint multiplier (home + opened export markets, normalised so home-only ≈ 1.0)
+    let regionMul = 1;
+    if(typeof Systems !== "undefined"){
+      const homeM = Systems.regionSalesMul(s, s.homeRegion) || 1;
+      let total = 0;
+      for(const r of REGIONS){ const rm = Systems.regionSalesMul(s, r.id); if(rm>0) total += rm; }
+      regionMul = clamp(total / homeM, 1, 4.5); // exports scale demand up to ~4.5x with all 5 regions open
+    }
+    const fanMul = (typeof Systems!=="undefined") ? Systems.fanDemandBonus(s) : 1;
+    const hqSale = (typeof Systems!=="undefined" && hqState(s).salesMul) ? hqState(s).salesMul : 1;
     for(const m of s.models){
       if(!m.published) continue;
       const seg = s.segSales[m.segment]; if(!seg) continue;
@@ -411,7 +443,15 @@ const Engine = {
       const compQ = s.competitors.filter(c=>c.seg===m.segment).map(c=>c.quality);
       const bestComp = compQ.length? Math.max(...compQ):40;
       let strength = appeal/(appeal+bestComp*0.9+8);
-      let desire = Math.round(seg.total * strength * marketing * .55);
+      // regional segment taste for this model's main market weighting
+      let taste = 1;
+      if(typeof Systems !== "undefined"){
+        let wsum=0, tsum=0;
+        for(const r of REGIONS){ const rm=Systems.regionSalesMul(s,r.id); if(rm<=0)continue;
+          wsum+=rm; tsum += rm*(r.traits[m.segment]||1); }
+        if(wsum>0) taste = tsum/wsum;
+      }
+      let desire = Math.round(seg.total * strength * marketing * .55 * campaignMul * regionMul * fanMul * hqSale * taste);
       // production capacity cap: a young company can't supply the whole world
       const activeLines = s.lines.filter(l=>l.modelId).length || 1;
       const capLimit = this.capacityPerLine(s)*activeLines*(1+(s.buildings.assembly-1)*0.35);
@@ -457,12 +497,14 @@ const Engine = {
 
   processCosts(s, soldInfo){
     const salaries = s.staff.reduce((a,p)=>a+p.salary,0);
-    const overhead = 1500 + s.lines.length*800 + Object.keys(s.buildings).reduce((a,k)=>a+(s.buildings[k]||0)*400,0);
+    const hqCity = (typeof HQ_CITIES!=="undefined") ? (HQ_CITIES.find(c=>c.id===s.hqCity)||{tax:1}) : {tax:1};
+    const overhead = Math.round((1500 + s.lines.length*800 + Object.keys(s.buildings).reduce((a,k)=>a+(s.buildings[k]||0)*400,0)) * (hqCity.tax||1));
     const interest = Math.round(s.loan*0.009);
     const designUpd = 0;
     const exp = salaries + overhead + interest + (s.productionSpend||0) + designUpd;
     s.money += soldInfo.revenue - exp;
     s.lastStatement = { revenue:soldInfo.revenue, salaries, overhead, interest, production:s.productionSpend||0, net: soldInfo.revenue-exp };
+    if(typeof Systems !== "undefined") Systems.statement(s, soldInfo.revenue, exp);
     if(s.money<0){
       // auto-loan attempt
       const maxLoan = 500000 + companyValue(s)*0.4;
@@ -527,12 +569,15 @@ const Engine = {
   },
 
   checkObjectives(s){
-    for(const o of OBJECTIVES){
-      if(!s.objectivesDone[o.id] && o.check(s)){
-        s.objectivesDone[o.id]=true;
-        s.money += o.rew;
-        this.pushNews(s,"🎯 Objective complete: "+o.txt+" (+$"+fmt(o.rew)+")");
-        toast("🎯 Objective complete! +$"+fmt(o.rew),"gold");
+    const lists = (typeof OBJECTIVES2 !== "undefined") ? [OBJECTIVES, OBJECTIVES2] : [OBJECTIVES];
+    for(const list of lists){
+      for(const o of list){
+        if(!s.objectivesDone[o.id] && o.check(s)){
+          s.objectivesDone[o.id]=true;
+          s.money += o.rew;
+          this.pushNews(s,"🎯 Objective complete: "+o.txt+" (+$"+fmt(o.rew)+")");
+          toast("🎯 Objective complete! +$"+fmt(o.rew),"gold");
+        }
       }
     }
   },
@@ -607,7 +652,25 @@ const Engine = {
     if(s.money<fee) return "Design fee $"+fmt(fee)+" — not enough cash.";
     s.money -= fee;
 
+    // ── deep part-family refinement tiers genuinely improve the engineered car ──
+    if(typeof Systems !== "undefined"){
+      const rf = (fam)=>Systems.refineMul(s, fam);
+      spec._refine = { engine:rf("engine"), gearbox:rf("gearbox"), chassis:rf("chassis"), brakes:rf("brakes"),
+                       susp:rf("susp"), tyres:rf("tyres"), interior:rf("interior"), electronics:rf("electronics"),
+                       safety:rf("safety"), emissions:rf("emissions") };
+    } else spec._refine = null;
+
     const ev = this.evalSpec(s, spec);
+    if(spec._refine){
+      // refinement tiers lift measured ratings a notch each (max tier 5 → +4 pts per family)
+      const r = spec._refine;
+      ev.R.reliability  = clamp(ev.R.reliability + Math.round((r.engine-1)*30 + (r.gearbox-1)*22 + (r.chassis-1)*26), 1, 100);
+      ev.R.performance  = clamp(ev.R.performance + Math.round((r.engine-1)*34 + (r.tyres-1)*20 + (r.susp-1)*16), 1, 100);
+      ev.R.safety       = clamp(ev.R.safety + Math.round((r.safety-1)*44 + (r.brakes-1)*28), 1, 100);
+      ev.R.comfort      = clamp(ev.R.comfort + Math.round((r.interior-1)*36 + (r.electronics-1)*20), 1, 100);
+      ev.R.fuelEco      = clamp(ev.R.fuelEco + Math.round((r.emissions-1)*30 + (r.engine-1)*14), 1, 100);
+      ev.unitCost       = Math.max(120, Math.round(ev.unitCost * (1 + (r.engine-1)*0.05))); // refined parts cost more to build
+    }
     if(spec._existingId){
       // update existing model (facelift)
       const m = s.models.find(x=>x.id===spec._existingId);
@@ -634,6 +697,10 @@ const Engine = {
       s.models.push(m);
       this.pushNews(s,"🚀 Model launch: <b>"+m.name+"</b> ("+SEGMENTS.find(g=>g.id===m.segment).name+", "+m.hp+" hp, $"+fmt(m.price)+")");
       toast("🚀 "+m.name+" launched!","good");
+      // press day: critics review the new model immediately (like CCT's review popups)
+      if(typeof Systems !== "undefined"){
+        try{ Systems.reviewModel(s, m); }catch(e){ /* reviews never block a launch */ }
+      }
     }
     return null;
   },

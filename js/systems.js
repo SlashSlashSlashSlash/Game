@@ -294,6 +294,13 @@ const Systems = {
     if(s.loan>0 && s.oilCrisis>this.absMonthSafe(s)) s.usedLoanDuringCrisis=true;
   },
 
+  // ─────────── Racing calendar: races every other month during season ───────────
+  tickRacing(s){
+    if(!s.raceTeam) return;
+    // race months: Apr(3), Jun(5), Aug(7), Oct(9) — 4-race season rhythm
+    if([3,5,7,9].includes(s.month)) this.simRace(s);
+  },
+
   // ─────────── Monthly profit statement ───────────
   statement(s, rev, costs){
     s.lastStatement = { month:this.absMonthSafe(s), revenue:rev, costs, net:rev-costs };
