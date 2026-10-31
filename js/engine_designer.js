@@ -319,6 +319,118 @@ const Designer = {
     return spec.tune;
   },
 
+  // ─────────── Car-level performance: real physics across the whole gearbox ───────────
+  // Integrates F=ma with wheel torque (engine torque curve x gear ratio x final drive x
+  // driveline efficiency), aerodynamic drag, rolling resistance and rotational inertia.
+  // Produces 0-60/100 times, standing quarter mile, top speed, braking & real consumption.
+  computePerformance(s, spec, engRes){
+    if(!engRes || !engRes.hp) return null;
+    const P = Designer.deepParts(s, spec);
+    const isEV = !!spec.engine.motor;
+    const bodyMass = { sedan:210, hatch:180, coupe:195, convert:205, wagon:225, pickup:260, suvbody:290, van:310, roadster:150 }[spec.body]||200;
+    let curb = (isEV? 140 : 95) + bodyMass + (engRes.mass||0);
+    const I = INTERIORS.find(x=>x.id===spec.interior)||INTERIORS[1]; curb += I.cost*0.06;
+    for(const oid of spec.options||[]){ const O=OPTIONS.find(x=>x.id===oid); if(O) curb += (O.unit||0)*0.8; }
+    curb = Math.round(curb);
+
+    const G = GEARBOXES.find(x=>x.id===spec.gearbox)||GEARBOXES[0];
+    const gearCountMap = { m3:3,m4:4,a3:3,a4:4,m5:5,cvt:6,m6:6,a6:6,dct:8,dct10:10,m7:7,sg:1 };
+    const nGear = isEV? 2 : (gearCountMap[G.id]||4);
+    const finalDrive = ({ fwd:4.1, rwd:3.7, awd:4.0, "4wd":3.9 })[spec.drivetrain]||3.8;
+    const dtEff = ({ fwd:.91, rwd:.93, awd:.88, "4wd":.87 })[spec.drivetrain]||.9;
+    const tyreR = 0.31;
+    const gRatio = [];
+    if(isEV){ gRatio.push(3.6, 2.1); }
+    else if(G.id==="cvt"){ for(let i=0;i<nGear;i++) gRatio.push(3.4*Math.pow(0.8,i)); }
+    else { const first=3.55, top=0.78;
+      for(let i=1;i<=nGear;i++) gRatio.push(first*Math.pow(top/first,(i-1)/Math.max(1,nGear-1))); }
+
+    // torque curve straight from the dyno sweep (same physics, no fakery)
+    let curve;
+    if(isEV){ curve = Dyno.runEVPull(s, spec).points; }
+    else { const pull = Dyno.runPull(s, spec); curve = pull.points; }
+    if(!curve.length) return null;
+    const redline = curve[curve.length-1].rpm || engRes.rpmRedline || 6500;
+    const lo = curve[0].rpm, hi = Math.max(1, curve[curve.length-1].rpm-lo);
+    const tqAt = rpm => {
+      if(rpm<=lo) return curve[0].torque*(0.55+0.45*Math.max(0,rpm)/Math.max(1,lo));
+      const f=(rpm-lo)/hi, idx=Math.min(curve.length-1, Math.floor(f*(curve.length-1)));
+      return curve[idx]?curve[idx].torque:0;
+    };
+
+    const cd = Designer.dragCd(spec.body, spec.options||[]);
+    const frontal = ({ sedan:2.1, hatch:2.0, coupe:1.9, convert:2.0, wagon:2.2, pickup:2.4, suvbody:2.5, van:2.8, roadster:1.7 })[spec.body]||2.1;
+    const rhoAir = 1.225, crr = ({ bias:.017, rad:.013, perf:.011, semi:.014 })[spec.tyres]||.013;
+    const massRot = curb*1.06, g0 = 9.81;
+    const gripT = TYRES.find(x=>x.id===spec.tyres)||TYRES[0];
+
+    const accelSim = (targetKmh) => {
+      let v=0,t=0,gear=0; const dt=0.02;
+      while(v < targetKmh/3.6 && t<60){
+        const wheelRps = v/(2*Math.PI*tyreR);
+        let erpm = wheelRps*60*gRatio[gear]*finalDrive;
+        if(erpm>=redline*0.995 && gear<nGear-1){ gear++; t+=0.28; continue; }
+        erpm=clamp(erpm,700,redline);
+        const boostFit = !(P.turbo&&P.turbo.lagK>0.6&&erpm<1900)?1:0.72;
+        let force = tqAt(erpm)*gRatio[gear]*finalDrive*dtEff*boostFit/tyreR;
+        const gripLimit = curb*g0*(0.75+gripT.grip/90);
+        if(gear===0 && force>gripLimit) force=gripLimit;
+        const vv=v*v;
+        const a=(force - 0.5*rhoAir*cd*frontal*vv - crr*curb*g0*(1+vv/90000))/massRot;
+        v+=Math.max(0,a)*dt; t+=dt;
+      }
+      return +t.toFixed(2);
+    };
+    const t0_60 = accelSim(96.56);
+    const t0_100 = accelSim(100);
+    const qtime = (()=>{ let v=0,d=0,t=0,gear=0; const dt=0.02;
+      while(d<402.34 && t<40){
+        const wheelRps=v/(2*Math.PI*tyreR);
+        let erpm=wheelRps*60*gRatio[gear]*finalDrive;
+        if(erpm>=redline*0.995 && gear<nGear-1){ gear++; t+=0.28; continue; }
+        erpm=clamp(erpm,700,redline);
+        let force=tqAt(erpm)*gRatio[gear]*finalDrive*dtEff/tyreR;
+        const gripLimit=curb*g0*(0.75+gripT.grip/90);
+        if(gear===0&&force>gripLimit)force=gripLimit;
+        const vv=v*v;
+        const a=(force-0.5*rhoAir*cd*frontal*vv-crr*curb*g0*(1+vv/90000))/massRot;
+        v+=Math.max(0,a)*dt; d+=v*dt; t+=dt;
+      }
+      return { time:+t.toFixed(2), trap:+(v*3.6).toFixed(0) };
+    })();
+    const topSpeed = (()=>{
+      for(let kmh=420; kmh>40; kmh-=1){
+        const v=kmh/3.6;
+        const erpm=Math.min(redline, v/(2*Math.PI*tyreR)*60*gRatio[nGear-1]*finalDrive);
+        const force=tqAt(erpm)*gRatio[nGear-1]*finalDrive*dtEff/tyreR;
+        const resist=0.5*rhoAir*cd*frontal*v*v + crr*curb*g0*(1+v*v/90000);
+        if(force>=resist) return kmh;
+      }
+      return 55;
+    })();
+    const brakeBase = ({ drum:0.55, discF:0.72, discA:0.8, absd:0.92, carbc:0.96 })[spec.brakes]||0.6;
+    const mu = clamp(brakeBase + (spec.safety==="espe"?0.05:0) + gripT.grip/240, 0.4, 1.05);
+    const v0=100/3.6; const aBrake = mu*g0 + 0.5*rhoAir*cd*frontal*v0*v0/curb;
+    const brakeDist = +(v0*v0/(2*aBrake)).toFixed(1);
+    const brake60 = +((60/3.6)*(60/3.6)/(2*aBrake*0.96)).toFixed(1);
+    const latG = clamp(0.62 + (spec._handling||45)/220 + gripT.grip/160, 0.5, 1.45);
+    const cruise = (()=>{
+      if(isEV){ const b=EV_BATTERIES.find(x=>x.id===spec.engine.batt)||EV_BATTERIES[0];
+        const kW=(0.5*rhoAir*cd*frontal*Math.pow(25,3)+crr*curb*g0*25)/1000/0.9;
+        return { kwh100:+(kW*100/25/0.92).toFixed(1), rangeKm:b.range }; }
+      const v=25;
+      const kW=(0.5*rhoAir*cd*frontal*v*v*v+crr*curb*g0*v)/1000/dtEff;
+      const bsfc=engRes.bsfc||285;
+      const dens=spec.engine.fuel==="diesel"?0.832:0.745;
+      return { l100:+(kW*bsfc/1000/dens*100/v).toFixed(2), kw90:+kW.toFixed(1) };
+    })();
+    const stressIndex = clamp(Math.round((t0_60<6?18:t0_60<9?10:t0_60<13?4:0)+(topSpeed>250?10:0)+((engRes.bmep||0)>16?8:0)),0,40);
+    return { curbMass:curb, t0_60, t0_100, quarter:qtime, topSpeed, brake100:brakeDist, brake60,
+             latG:+latG.toFixed(2), powerWt:+(engRes.hp/(curb/1000)).toFixed(1),
+             gears:nGear, finalDrive, cd, frontal, mu:+mu.toFixed(2),
+             cruise, stressIndex,
+             shiftTime:(G.id==="dct"||G.id==="dct10")?0.12:(G.id.startsWith("a")||G.id==="cvt")?0.35:0.45 };
+  },
   // ── EV / hybrid powertrain computation ──
   computeEV(s, spec){
     const m = EV_MOTORS.find(x=>x.id===spec.engine.motor);

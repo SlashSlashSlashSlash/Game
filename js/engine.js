@@ -229,6 +229,21 @@ const Engine = {
     const age = (this.absMonth(s) - (spec._designMonth!=null?spec._designMonth:this.absMonth(s)))/12;
     const agePenalty = age*4.5;
 
+    // ── real physics performance package: dyno curve integration across the gearbox ──
+    let perfPkg = null;
+    try { perfPkg = Designer.computePerformance(s, spec, engRes); } catch(e){ perfPkg = null; }
+    if(perfPkg){
+      spec._perf = perfPkg;
+      mass = perfPkg.curbMass;                       // use physically-summed curb weight
+      // blend measured results into the performance rating (measured data dominates)
+      const measPerf = clamp(Math.round(
+          (12.5 - Math.min(12.5, perfPkg.t0_60))*7 +           // 0-60: 0s→87pts, 12.5s→0
+          clamp((perfPkg.topSpeed-90)/240*30,0,30) +            // top speed up to 330
+          clamp((perfPkg.powerWt-20)*0.55,0,28)), 0, 145);      // power-to-weight
+      perf = Math.round(perf*0.35 + measPerf*bench/100*0.65);
+      eco = eco*0.55 + clamp(perfPkg.cruise.l100!=null? (perfPkg.cruise.l100/16): (perfPkg.cruise.kwh100?0.55:1),0.3,1.6)*0.45*eco;
+    }
+
     // era benchmark power (grows through decades) — used to normalise performance rating
     const yrNow = s.year;
     const bench = 55 + Math.max(0,(yrNow-1950))*2.6;   // "average" car power points for the era
@@ -245,7 +260,7 @@ const Engine = {
     // scale part costs to the game era (data values are modern dollars)
     const eraF = 0.28 + 0.72*Math.max(0,s.year-1950)/75;
     const unitCost = Math.max(120, Math.round((cost*0.9 + 350)*eraF));
-    return { R, unitCost, hp: spec._hp||0, mass: Math.round(mass) };
+    return { R, unitCost, hp: spec._hp||0, mass: Math.round(mass), perf: spec._perf||null };
   },
 
   // appeal score 0-100 of a model against its segment
@@ -596,7 +611,7 @@ const Engine = {
     if(spec._existingId){
       // update existing model (facelift)
       const m = s.models.find(x=>x.id===spec._existingId);
-      Object.assign(m,{ name:spec.name, spec:{...spec}, R:ev.R, unitCost:ev.unitCost, hp:ev.hp, mass:ev.mass, price:Math.round(price), facelifts:(m.facelifts||0)+1, cd:spec._cd, handling:spec._handling, wd:spec._wd, torque:spec._eng?spec._eng.torque:0, redline:spec._eng?spec._eng.rpmRedline:0, range:spec._range||0 }); m.version=(m.version||1)+1;
+      Object.assign(m,{ name:spec.name, spec:{...spec}, R:ev.R, unitCost:ev.unitCost, hp:ev.hp, mass:ev.mass, price:Math.round(price), facelifts:(m.facelifts||0)+1, cd:spec._cd, handling:spec._handling, wd:spec._wd, torque:spec._eng?spec._eng.torque:0, redline:spec._eng?spec._eng.rpmRedline:0, range:spec._range||0, perf:ev.perf, stress:ev.perf?ev.perf.stressIndex:0 }); m.version=(m.version||1)+1;
       m.appeal = this.modelAppeal(s,m);
       this.pushNews(s,"🔧 Facelift released: <b>"+m.name+"</b> (v"+m.version+")");
       toast("Facelift applied to "+m.name,"good");
@@ -612,6 +627,8 @@ const Engine = {
         torque: spec._eng ? spec._eng.torque : 0,
         redline: spec._eng ? spec._eng.rpmRedline : 0,
         range: spec._range || 0,
+        perf: ev.perf,                      // measured physics: 0-60, quarter mile, top speed...
+        stress: ev.perf ? ev.perf.stressIndex : 0,
       };
       m.appeal = this.modelAppeal(s,m);
       s.models.push(m);
