@@ -24,64 +24,120 @@ const Designer = {
     return clamp(Math.round(Math.cbrt(4*v/Math.PI)), ENGINE_TUNING.boreMin, ENGINE_TUNING.boreMax);
   },
 
+  // ── deep-part resolution helpers (all backward-compatible with old saves) ──
+  deepParts(s, spec){
+    const E = spec.engine;
+    const cyls = this.cylCount(E.layout);
+    const tune = spec.tune || this.autoTune(s, spec);
+    const pick = (arr, id, fallbackIdFn)=>{
+      let p = id? arr.find(x=>x.id===id) : null;
+      if(!p) p = arr.find(x=>x.id===fallbackIdFn()) || arr[0];
+      return p;
+    };
+    // block: prefer new per-cyl library, fall back to legacy material ids
+    let block = pick(ENGINE_BLOCKS, E.deepBlock, ()=> "bkI"+cyls);
+    if(E.deepBlock==null && E.block){ const legacy = BLOCK_MATERIALS.find(b=>b.id===E.block);
+      if(legacy){ const map={iron:"bkI",steel:"bkS",alublk:"bkA",compblk:"bkC"};
+        block = ENGINE_BLOCKS.find(x=>x.id===(map[legacy.id]||"bkI")+cyls) || block; } }
+    let head   = pick(CYL_HEADS,   E.deepHead,   ()=> "hdI"+cyls);
+    let piston = pick(PISTON_SETS, E.deepPiston, ()=> "ptF"+cyls);
+    let rodSet = pick(CONROD_SETS, E.deepRod,    ()=> "crC"+cyls);
+    let crank  = pick(CRANKSHAFTS, E.deepCrank,  ()=> "cs"+cyls);
+    let cam    = pick(CAM_PROFILES, E.deepCam,   ()=> "cmS"+cyls);
+    const turbo  = partById(TURBO_SIZING, E.deepTurbo)  || TURBO_SIZING[0];
+    const wg     = partById(WASTEGATES,   E.deepWg)     || WASTEGATES[0];
+    const ic     = partById(INTERCOOLERS, E.deepIc)     || INTERCOOLERS[0];
+    const mix    = partById(MIXTURE_TUNE, E.deepMix)    || MIXTURE_TUNE[3];
+    const gov    = partById(REV_GOVERNORS,E.deepGov)    || null;
+    const coolP  = partById(COOLING_PARTS,E.deepCool)   || COOLING_PARTS[0];
+    const exhP   = partById(EXHAUST_ROUTING,E.deepExh)  || EXHAUST_ROUTING[1];
+    const catP   = partById(CAT_PATHS, E.deepCat)       || null;
+    return { cyls, tune, block, head, piston, rodSet, crank, cam, turbo, wg, ic, mix, gov, coolP, exhP, catP };
+  },
+  // is a deep part currently purchasable/legal for this company & year?
+  partLegal(s, p){
+    if(!p) return true;
+    if(p.year && s.year < p.year) return false;
+    if(p.tech && !s.techs[p.tech]) return false;
+    return true;
+  },
+  // effective rev ceiling including every rotating-assembly part
+  deepRevCeiling(s, spec, P){
+    let cap = ENGINE_TUNING.revBase
+      + (P.crank.revLimit||0)/2.2 + (P.rodSet.revLimit||0)/2.4
+      + (P.piston.revLimit||0)/3 + (P.head.revLimit||0)/3 + (P.cam.revLimit||0)/2.6
+      + (P.coolP.revLimit||0)/2 + (P.gov? (P.gov.rpm-6000)/2 : 0);
+    return Math.round(clamp(cap, 3200, 12000));
+  },
+
   // ── compression ratio ladder (unlocked by fuel & tech) ──
   maxCompression(s, spec){
+    const P = this.deepParts(s, spec);
     let cr = 6.5;                                     // 1950s cast-iron baseline
     if(s.techs.fuelinj) cr += 1.5;
     if(s.techs.dohc)    cr += 1.5;
     if(s.techs.vvt)     cr += 1.0;
-    const blk = BLOCK_MATERIALS.find(b=>b.id===spec.engine.block);
-    if(blk && blk.id==="alublk") cr += 0.8;
-    if(blk && blk.id==="compblk") cr += 1.4;
+    const vt = VALVETRAINS.find(v=>v.id===(spec.engine.valvetrain||"ohv"))||VALVETRAINS[1];
+    cr += ({ sv:0, ohv:.3, sohc:.7, dohc:1.1, vvtv:1.5 })[vt.id]||0;
+    cr += P.block.compCap||0;                         // aluminium / ceramic blocks tolerate more
+    cr += (P.head.compAdd||0) + (P.piston.compAdd||0);// dome pistons & flowy heads raise it
+    if(P.catP && P.catP.powerM<1) cr += .2;           // tuned for higher efficiency ratios
     if(spec.engine.fuel==="diesel") cr = Math.max(cr, 16) + (s.techs.diesel?2:0); // diesels run 16-22:1
-    if(spec.engine.asp==="turbo"||spec.engine.asp==="bturbo") cr -= 2.5;           // boosted engines lean on CR
+    if(spec.engine.asp==="turbo"||spec.engine.asp==="bturbo") cr -= 2.5 - (P.ic.tempRisk<0?0.5:0);
     return clamp(cr, 6, 23);
   },
 
   // ── RPM ceiling from reciprocating mass & mean piston speed ──
   rpmCeiling(s, spec){
-    const stroke = spec.tune ? spec.tune.stroke : 86;
+    const P = this.deepParts(s, spec);
+    const stroke = P.tune.stroke;
     const rod = ROD_MATERIALS.find(r=>r.id===(spec.engine.rod||"cast"))||ROD_MATERIALS[0];
-    const crank = CRANK_MATERIALS.find(c=>c.id===(spec.engine.crank||"steelcrank"))||CRANK_MATERIALS[0];
-    const block = BLOCK_MATERIALS.find(b=>b.id===(spec.engine.block||"iron"))||BLOCK_MATERIALS[0];
     // mean piston speed budget: m/s ≈ 18 stock, better materials raise it
-    let mpsBudget = 17 + rod.revLimit/400 + crank.revLimit/500;
-    if(block.id==="compblk") mpsBudget += 2;
+    let mpsBudget = 17 + rod.revLimit/400 + (P.crank.revLimit||0)/650 + (P.rodSet.revLimit||0)/700
+                  + (P.piston.revLimit||0)/900;
+    if(P.block.id.startsWith("bkC")) mpsBudget += 2;
+    if(P.block.id.startsWith("bkA")) mpsBudget += 1;
+    if(P.head.revLimit>=700) mpsBudget += 1.2;
     if(spec.engine.valvetrain==="dohc"||spec.engine.valvetrain==="vvtv") mpsBudget += 2.5;
     if(spec.engine.valvetrain==="sohc") mpsBudget += 1.2;
+    if(P.cam.revLimit>=1500) mpsBudget += 1.5; else if(P.cam.revLimit>=400) mpsBudget += .8;
+    if(P.coolP.tempRisk<0) mpsBudget += Math.min(3,-P.coolP.tempRisk/5);
     if(spec.engine.cooling==="oilcool") mpsBudget += 1;
     if(spec.engine.cooling==="duocool") mpsBudget += 2;
-    const revAdd = ENGINE_TUNING.revMaxAdd.rod[rod.id] + ENGINE_TUNING.revMaxAdd.crank[crank.id];
+    const revAdd = ENGINE_TUNING.revMaxAdd.rod[rod.id] + ENGINE_TUNING.revMaxAdd.crank[crankFallbackId(spec)];
     // rpm where mean piston speed hits budget: rpm = mps*60000/(2*stroke)
     const rpmFromSpeed = mpsBudget*60000/(2*stroke);
-    const cap = Math.min(ENGINE_TUNING.revBase + revAdd + (spec.engine.valvetrain==="sv"? -900:0), rpmFromSpeed);
+    const deepCap = this.deepRevCeiling(s, spec, P);
+    const cap = Math.min(deepCap + revAdd*0.5, rpmFromSpeed);
     return Math.round(clamp(cap, 3500, 11000));
   },
 
   // ── breathing / volumetric efficiency ──
   volEfficiency(s, spec, rpm){
     const vt = VALVETRAINS.find(v=>v.id===(spec.engine.valvetrain||"ohv"))||VALVETRAINS[1];
-    const exh = EXHAUST_SYS.find(e=>e.id===(spec.engine.exhaust||"restricted"))||EXHAUST_SYS[0];
-    const cyls = this.cylCount(spec.engine.layout);
-    const disp = spec.tune ? spec.tune.dispCC : 1600;
+    const P = this.deepParts(s, spec);
+    const cyls = P.cyls;
+    const disp = P.tune.dispCC;
     const perCyl = disp/cyls;                          // cc per cylinder
-    const bore = spec.tune ? spec.tune.bore : 83;
+    const bore = P.tune.bore;
     // base VE curve: peak near mid-range, falls off at extremes
     const rpmCeil = this.rpmCeiling(s, spec);
-    const peakRpm = rpmCeil*0.62;
+    let peakRpm = rpmCeil*0.62 * (1+(P.cam.rpmPeakShift||0));   // cam grind moves the power band
+    peakRpm = Math.max(rpmCeil*0.35, peakRpm);
     const t = (rpm-peakRpm)/peakRpm;                   // -1..+
     let ve = 0.86 - 0.55*t*t;                          // parabola
     // valvetrain lifts the curve
     ve += ({ sv:-0.06, ohv:0, sohc:0.03, dohc:0.06, vvtv:0.09 })[vt.id] || 0;
-    // exhaust restriction chokes top end
-    if(exh.id==="restricted" && rpm>peakRpm) ve -= 0.05*((rpm-peakRpm)/peakRpm);
-    if(exh.id==="free")   ve += 0.02;
-    if(exh.id==="raceexh")ve += 0.045;
-    // big single cylinders breathe worse per cc
-    ve -= Math.max(0,(perCyl-700))/700*0.03;
-    // small bores at high lift restrict
-    ve -= Math.max(0, 74-bore)/74*0.04;
-    if(s.techs.turbo && (spec.engine.asp==="turbo"||spec.engine.asp==="bturbo")) ve += 0.18; // forced induction fills cylinders
+    // deep parts: head flow, cam grind, exhaust back-pressure
+    ve += (P.head.flowM-1)*0.55 + (P.cam.veAdd||0);
+    ve -= P.exhP.backPressure*0.22;                    // restrictive pipes choke breathing
+    if(P.catP) ve -= P.catP.ecoPen>1.05?0.02:0.008;    // cats add a little restriction
+    // forced induction sizing actually fitted
+    const boosted = spec.engine.asp==="turbo"||spec.engine.asp==="bturbo";
+    if(boosted && s.techs.turbo){
+      const fit = P.turbo.minDisp<=disp && P.turbo.maxDisp>=disp;
+      ve += fit ? 0.14 + P.turbo.boostBar*0.1 : 0.05;  // badly-sized turbo barely helps
+    } else if(spec.engine.asp==="sc"){ ve += 0.1; }
     if(spec.engine.fuelSys==="mpfi") ve += 0.03;
     if(spec.engine.fuelSys==="gdi") ve += 0.05;
     return clamp(ve, 0.35, 1.35);
@@ -90,80 +146,115 @@ const Designer = {
   // ── core thermodynamic power model ──
   computeEngine(s, spec){
     const tune = spec.tune || this.autoTune(s, spec);
-    const cyls = this.cylCount(spec.engine.layout);
+    const P = this.deepParts(s, spec);
+    const cyls = P.cyls;
     const disp = tune.dispCC;
     const A = ASPIRATION.find(x=>x.id===spec.engine.asp)||ASPIRATION[0];
     const FS= FUEL_SYS.find(x=>x.id===spec.engine.fuelSys)||FUEL_SYS[0];
     const F = ENGINE_FUELS.find(x=>x.id===spec.engine.fuel)||ENGINE_FUELS[0];
     const RICH = FUEL_RICHNESS.find(r=>r.id===(spec.engine.richness||"ideal"))||FUEL_RICHNESS[1];
     const cr = this.maxCompression(s, spec);
-    const rpmRedline = Math.min(spec.engine.revLimit||9000, this.rpmCeiling(s,spec));
-    const rpmPeak = rpmRedline*0.78;
+    let rpmRedline = Math.min(spec.engine.revLimit||9000, this.rpmCeiling(s,spec));
+    if(P.gov) rpmRedline = Math.min(rpmRedline, P.gov.rpm);   // fitted governor clamps the ceiling
+    let rpmPeak = rpmRedline*0.78 * (1+(P.cam.rpmPeakShift||0)+(P.crank.rpmPeakShift||0));
+    rpmPeak = clamp(rpmPeak, rpmRedline*0.42, rpmRedline*0.95);
 
     // brake mean effective pressure (bar): naturally aspirated petrol ~9-11 modern
     let bmep = 6.2 + cr*0.22;                                   // 6.5→7.6 ... 13→9.1
     if(F.id==="diesel") bmep += 1.6;
-    if(A.id==="turbo")  bmep += 4.2*Math.min(1.0, 0.55+disp/4000); // boost scaled to size
-    if(A.id==="bturbo") bmep += 6.0*Math.min(1.0, 0.55+disp/4000);
-    if(A.id==="sc")     bmep += 3.4;
-    bmep *= RICH.powerM;
-    bmep *= FS.powerM>=1?Math.min(1.12,FS.powerM):FS.powerM;      // injection helps filling more than raw mult
+    const boosted = A.id==="turbo"||A.id==="bturbo";
+    const turboFit = P.turbo.minDisp<=disp && P.turbo.maxDisp>=disp;
+    if(boosted && s.techs.turbo){
+      // boost pressure from the ACTUAL turbo fitted (falls back to legacy aspiration table)
+      let bar = turboFit? P.turbo.boostBar : (P.turbo.id==="tnone"? (A.id==="turbo"?.7:1.0) : .35);
+      bar += P.wg.boostAdj||0;
+      if(!s.techs.intercooler && P.ic.id!=="icnone") bar -= .1;   // no IC tech, mild charge cooling lost
+      bmep += bar*4.6*Math.min(1.0, 0.55+disp/4000);
+      if(A.id==="bturbo") bmep += bar*1.1;                        // twin setup adds a second snail's worth
+    }
+    if(A.id==="sc") bmep += 3.4;
+    bmep *= RICH.powerM * P.mix.powerM;                           // legacy richness + fine mixture tune
+    bmep *= FS.powerM>=1?Math.min(1.12,FS.powerM):FS.powerM;       // injection helps filling more than raw mult
     bmep *= (0.9 + 0.1*Math.min(1.4, this.volEfficiency(s,spec,rpmPeak)/0.86 ));
+    bmep *= P.exhP.powerM * (P.catP?P.catP.powerM:1);              // exhaust routing & catalyst restriction
+    bmep *= P.cam.powerM||1;
+    if(boosted && turboFit) bmep *= 1 + (P.ic.powerM-1)*0.9;       // intercooling density gain
+    if(P.crank.torqueM) { /* torque shape handled below via peak shift */ }
 
     // power (kW) = bmep(bar)*disp(L)*rpm/1200 ; classic 4-stroke formula
     const kw = bmep * (disp/1000) * rpmPeak / 1200;
     let hp = kw * 1.341;
 
-    // reliability penalties from over-stressing
+    // reliability model — every stressor in the parts bin counts
     let relMod = 0;
-    if(spec.engine.revLimit && spec.engine.revLimit < this.rpmCeiling(s,spec)-200) relMod += 2;   // under-revved = safe
-    if(spec.engine.revLimit > this.rpmCeiling(s,spec)) relMod -= 6;                                // beyond parts limits
-    if(cr>11.5 && F.id!=="diesel" && A.id==="na") relMod -= 3;                                    // high-CR NA knock risk
-    if((A.id==="bturbo") && (spec.engine.cooling==="thermo")) relMod -= 5;                        // twin turbo needs cooling
+    const ceil = this.rpmCeiling(s,spec);
+    if(spec.engine.revLimit && spec.engine.revLimit < ceil-200) relMod += 2;   // under-revved = safe
+    if(spec.engine.revLimit > ceil) relMod -= 6;                                 // beyond parts limits
+    if(cr>11.5 && F.id!=="diesel" && A.id==="na") relMod -= 3;                   // high-CR NA knock risk
+    if(boosted && !turboFit) relMod -= 5;                                        // mismatched turbo = over-boost risk
+    if((A.id==="bturbo") && (spec.engine.cooling==="thermo") && P.coolP.tempRisk>=0) relMod -= 5; // twin turbo needs cooling
     relMod += (F.relM||0)+(A.relM||0)+(FS.relM||0);
     const vt = VALVETRAINS.find(v=>v.id===(spec.engine.valvetrain||"ohv"))||VALVETRAINS[1];
     relMod += vt.relM||0;
-    const blk = BLOCK_MATERIALS.find(b=>b.id===(spec.engine.block||"iron"))||BLOCK_MATERIALS[0];
-    relMod += blk.relM||0;
-    const rod = ROD_MATERIALS.find(r=>r.id===(spec.engine.rod||"cast"))||ROD_MATERIALS[0];
-    relMod += rod.relM||0;
+    relMod += P.block.relM||0; relMod += P.head.relM||0; relMod += P.piston.relM||0;
+    relMod += P.rodSet.relM||0; relMod += P.crank.relM||0; relMod += P.cam.relM||0;
+    relMod += P.coolP.relM||0; relMod += P.wg.relM||0; relMod += (P.ic.relM||0);
+    relMod += P.mix.relM||0; relMod += (P.gov?P.gov.relM:0);
+    if(P.catP && P.catP.legality>=3) relMod += 1;                 // emission-monitored engines are safer
+    // lean mixtures + hot running + high specific load → detonation damage
+    const heatStress = P.mix.tempRisk + P.coolP.tempRisk - (P.ic.tempRisk||0)*(boosted?1:0.2);
+    if(heatStress>8) relMod -= Math.round(heatStress*0.7);
+    if(bmep>19 && F.id!=="diesel") relMod -= Math.round((bmep-19)*1.4);          // detuning big boost hurts
+    if(disp/cyls>950 && boosted) relMod -= 3;                     // huge boosted cylinders
 
     // fuel consumption: BSFC g/kWh map
     let bsfc = 285;                                 // carbureted petrol baseline
     if(FS.id==="mpfi") bsfc -= 25;
     if(FS.id==="gdi")  bsfc -= 40;
     if(F.id==="diesel") bsfc -= 55;
-    if(A.id==="turbo") bsfc -= 15; if(A.id==="bturbo") bsfc += 5; if(A.id==="sc") bsfc += 25;
-    bsfc *= RICH.ecoM;
-    const exh = EXHAUST_SYS.find(e=>e.id===(spec.engine.exhaust||"restricted"))||EXHAUST_SYS[0];
-    bsfc *= exh.ecoM||1;
+    if(boosted) bsfc += turboFit? (P.turbo.boostBar>1? 12:-8) : 20;
+    if(A.id==="sc") bsfc += 25;
+    bsfc *= RICH.ecoM * P.mix.ecoM;
+    bsfc *= P.exhP.ecoM||1;
+    bsfc *= (P.catP?P.catP.ecoPen:1);
+    bsfc *= P.head.flowM>1.1?0.97:1;
     if(s.techs.catconv && spec.emissions!=="raw") bsfc += 8;
 
-    // mass of the engine
+    // mass of the engine — built bottom-up from actual components
     let mass = 55 + disp*0.55 + cyls*4.5;          // kg-ish
-    mass *= ({ iron:1.12, steel:1.0, alublk:0.82, compblk:0.68 })[blk.id]||1;
+    mass += (P.block.massP||0) + (P.head.massP||0) + (P.piston.massP||0) + (P.rodSet.massP||0) + (P.crank.massP||0);
     mass += ({ na:0, turbo:18, bturbo:34, sc:22 })[A.id]||0;
+    if(boosted && turboFit) mass += 6 + P.turbo.boostBar*14;
+    mass += P.ic.massP||0; mass += P.coolP.massP||0; mass += P.exhP.massP||0;
     mass += (FS.cost||0)/40;
     mass += tune.bore>tune.stroke*1.15 ? 4 : 0;
-    if(rod.id==="titan") mass -= 8;
     if(spec.engine.cooling==="oilcool") mass += 5;
     if(spec.engine.cooling==="duocool") mass += 14;
-    if(exh.id==="raceexh") mass -= 9;
 
-    // cost
+    // cost — summed from every real part chosen
     let cost = 260 + disp*0.30 + cyls*55;
-    cost += ({ na:0, turbo:950, bturbo:2100, sc:1300 })[A.id]||0;
-    cost += FS.cost||0; cost += F.cost||0; cost += vt.cost||0; cost += blk.cost||0;
-    cost += rod.cost||0; cost += (CRANK_MATERIALS.find(c=>c.id===spec.engine.crank)||{cost:0}).cost||0;
-    cost += (COOLING_SYS.find(c=>c.id===spec.engine.cooling)||{cost:0}).cost||0;
-    cost += exh.cost||0;
+    cost += P.block.cost||0; cost += P.head.cost||0; cost += P.piston.cost||0;
+    cost += P.rodSet.cost||0; cost += P.crank.cost||0; cost += P.cam.cost||0;
+    cost += P.coolP.cost||0; cost += P.exhP.cost||0;
+    if(boosted){ cost += turboFit? P.turbo.cost||0 : 500; cost += P.wg.cost||0; cost += P.ic.cost||0; }
+    else if(A.id==="sc"){ cost += 1300; }
+    cost += P.catP? P.catP.cost||0 : 0;
+    cost += (P.gov?P.gov.cost||0:0);
+    cost += FS.cost||0; cost += F.cost||0; cost += vt.cost||0;
+    // legacy coarse adders removed — deep parts replace them
 
     // torque figure for display & performance feel
-    const torqueNm = bmep*1.25*(disp/1000)*100/ (4*Math.PI) * 1000/1000; // simplified BMEP→torque
-    const torque = Math.round(bmep * (disp/1000) * 100 / 1.256);         // Nm ≈ bmep_bar*L*1000/(2π)*... tuned constant
+    let torqueK = 1.25;
+    if(P.crank.torqueM) torqueK *= P.crank.torqueM;
+    if(P.cam.torqueM) torqueK *= P.cam.torqueM;
+    const torque = Math.round(bmep * (disp/1000) * 100 / torqueK);   // Nm ≈ bmep_bar*L*1000/(2π), tuned constant
 
     // noise level feeds comfort/safety ratings later
-    let noise = 40 + disp*0.004 + cyls*1.5 + (exh.noise||0) + ((A.id!=="na")?6:0);
+    let noise = 40 + disp*0.004 + cyls*1.5 + (P.exhP.noise||0) + ((A.id!=="na")?6:0)
+              + (P.crank.noise||0) + (P.wg.noise||0) + (vt.id==="sv"?-3:0);
+
+    // emissions legality tier of this engine (used by regulatory checks)
+    const cleanTier = F.id==="hybridf"?3 : (P.catP? P.catP.legality : 0);
 
     // hybrid blend
     let hybridHp = 0, hybridCost = 0, hybridMass = 0, ecoBonus = 1;
@@ -181,8 +272,9 @@ const Designer = {
 
     return { hp:Math.round(hp), torque, rpmRedline, bmep:bmep.toFixed(1), cr:+cr.toFixed(1),
              bsfc:Math.round(bsfc), mass:Math.round(mass), cost:Math.round(cost), relMod:Math.round(relMod),
-             noise:Math.round(noise), ve:this.volEfficiency(s,spec,rpmPeak).toFixed(2),
-             eco:(bsfc/285)*(1/(hp>0?(hp/hp):1))*ecoBonus*(F.id==="diesel"?0.82:1)*(A.id==="turbo"?0.94:A.id==="sc"?1.1:1),
+             noise:Math.round(noise), ve:this.volEfficiency(s,spec,rpmPeak).toFixed(2), cleanTier,
+             rpmPeak:Math.round(rpmPeak), heatStress:Math.round(heatStress),
+             eco:(bsfc/285)*ecoBonus*(F.id==="diesel"?0.82:1)*(boosted&&turboFit?0.94:A.id==="sc"?1.1:1),
              hybridHp:Math.round(hybridHp) };
   },
 
